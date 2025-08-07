@@ -1,47 +1,87 @@
-from machine import Pin, I2C
 import time
-import dht
-import network
-import urequests
+import json
+import machine
+import urequests as requests
+from wifi_connection import WiFiConnection
+from temperature_sensor import TemperatureSensor
+from humidity_sensor import HumiditySensor
 
-# Sensor DHT11 no pino 4
-sensor = dht.DHT11(Pin(4))
+# CONFIGURAÇÕES
+WIFI_SSID = # rede wifi
+WIFI_PASSWORD = # senha
+BACKEND_URL = # api back
+DEVICE_ID = "BITDOG-01"
+SENSOR_PIN = 4
+UPDATE_INTERVAL = 30 
 
-# Conecta ao Wi-Fi
-def conecta_wifi(ssid, senha):
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    wlan.connect(ssid, senha)
-    while not wlan.isconnected():
-        time.sleep(1)
-    print("Conectado! IP:", wlan.ifconfig()[0])
+# INICIALIZAÇÃO DOS COMPONENTES
+wifi = WiFiConnection(WIFI_SSID, WIFI_PASSWORD)
+temp_sensor = TemperatureSensor(SENSOR_PIN)
+hum_sensor = HumiditySensor(SENSOR_PIN)
 
-# Inicializa Wi-Fi
-conecta_wifi("Gabriel", "16081914")
+# FUNÇÃO PARA ENVIAR DADOS AO BACKEND
+def send_to_backend(temperature, humidity):
+    payload = {
+        "device_id": DEVICE_ID,
+        "temperature": temperature,
+        "humidity": humidity,
+        "timestamp": time.time()  
+    }
 
-# Loop principal: envia leitura do sensor
-while True:
+    headers = {"Content-Type": "application/json"}
+
     try:
-        sensor.measure()
-        temp = sensor.temperature()
-        umid = sensor.humidity()
-
-        print("Enviando dados:", temp, umid)
-
-        payload = {
-            "temperatura": temp,
-            "umidade": umid
-        }
-
-        resposta = urequests.post(
-            "http://192.168.3.103:3000/dados", 
-            json=payload
-        )
-
-        print("Resposta:", resposta.status_code)
-        resposta.close()
-
+        print("Enviando dados para o backend...")
+        response = requests.post(BACKEND_URL, data=json.dumps(payload), headers=headers)
+        print("Resposta:", response.status_code, response.text)
+        response.close()
+        return response.status_code == 200
     except Exception as e:
-        print("Erro:", e)
+        print("Erro ao enviar dados:", e)
+        return False
 
-    time.sleep(5)
+def main():
+    last_sent = 0
+
+    while True:
+        wifi_c = wifi.connect()
+
+        if not wifi_c:
+            print("Wi-Fi desconectado. Tentando novamente...")
+            time.sleep(5)
+            continue
+
+        # Leitura dos sensores
+        temperature = temp_sensor.read()
+        humidity = hum_sensor.read()
+
+        if temperature is not None and humidity is not None:
+            print(f"Leitura atual: Temp={temperature}°C | Hum={humidity}%")
+        else:
+            temperature = temp_sensor.get_last_reading()
+            humidity = hum_sensor.get_last_reading()
+            if temperature is not None and humidity is not None:
+                print(f"Usando última leitura válida: Temp={temperature}°C | Hum={humidity}%")
+            else:
+                print("Erro na leitura dos sensores.")
+                time.sleep(5)
+                continue
+
+        # Enviar dados a cada intervalo
+        current_time = time.time()
+        if current_time - last_sent > UPDATE_INTERVAL:
+            if send_to_backend(temperature, humidity):
+                print("Dados enviados com sucesso.")
+                last_sent = current_time
+            else:
+                print("Erro no envio dos dados.")
+
+        time.sleep(1)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print("Erro fatal:", e)
+        time.sleep(10)
+        machine.reset()
