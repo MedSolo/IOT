@@ -1,87 +1,120 @@
-import time
+import urequests
 import json
-import machine
-import urequests as requests
-from wifi_connection import WiFiConnection
-from temperature_sensor import TemperatureSensor
-from humidity_sensor import HumiditySensor
+from machine import Pin, I2C
+from ssd1306 import SSD1306_I2C
 
-# CONFIGURAÇÕES
-WIFI_SSID = # rede wifi
-WIFI_PASSWORD = # senha
-BACKEND_URL = # api back
-DEVICE_ID = "BITDOG-01"
-SENSOR_PIN = 4
-UPDATE_INTERVAL = 30 
+# --- IMPORTACAO DOS MODULOS ---
+from temperatura import ler_temperatura_interna
+from umidade_solo import ler_sensor_solo
+import wifi 
+from wifi import conectar_wifi 
 
-# INICIALIZAÇÃO DOS COMPONENTES
-wifi = WiFiConnection(WIFI_SSID, WIFI_PASSWORD)
-temp_sensor = TemperatureSensor(SENSOR_PIN)
-hum_sensor = HumiditySensor(SENSOR_PIN)
+print("<1 MedSolo")
+print("="*40)
 
-# FUNÇÃO PARA ENVIAR DADOS AO BACKEND
-def send_to_backend(temperature, humidity):
-    payload = {
-        "device_id": DEVICE_ID,
-        "temperature": temperature,
-        "humidity": humidity,
-        "timestamp": time.time()  
-    }
+i2c = I2C(1, scl=Pin(15), sda=Pin(14))
+try:
+    oled = SSD1306_I2C(128, 64, i2c)
+    oled.fill(0)
+    oled.text("MedSolo Iniciando", 0, 0)
+    oled.show()
+    print(" Display: OK")
+except Exception as e:
+    print(f"L Display: {e}")
+    oled = None
 
-    headers = {"Content-Type": "application/json"}
-
+def enviar_dados(temp, solo_pct):
+    """Envia dados de temperatura e umidade do solo para o servidor."""
     try:
-        print("Enviando dados para o backend...")
-        response = requests.post(BACKEND_URL, data=json.dumps(payload), headers=headers)
-        print("Resposta:", response.status_code, response.text)
-        response.close()
-        return response.status_code == 200
+        dados = {
+            "temperatura": temp,
+            "solo": solo_pct
+        }
+        resposta = urequests.post(
+            wifi.SERVER_URL,
+            data=json.dumps(dados),
+            headers={'Content-Type': 'application/json'},
+            timeout=10
+        )
+        sucesso = resposta.status_code == 200
+        resposta.close()
+        if sucesso:
+            print(" Dados enviados")
+        else:
+            print(f"L Erro servidor: {resposta.status_code}")
+        return sucesso
     except Exception as e:
-        print("Erro ao enviar dados:", e)
+        print(f"L Erro envio: {e}")
         return False
 
-def main():
-    last_sent = 0
-
-    while True:
-        wifi_c = wifi.connect()
-
-        if not wifi_c:
-            print("Wi-Fi desconectado. Tentando novamente...")
-            time.sleep(5)
-            continue
-
-        # Leitura dos sensores
-        temperature = temp_sensor.read()
-        humidity = hum_sensor.read()
-
-        if temperature is not None and humidity is not None:
-            print(f"Leitura atual: Temp={temperature}°C | Hum={humidity}%")
+def atualizar_display(temp, solo_pct, wifi_ok, server_ok, ciclo):
+    """Atualiza o display OLED com os dados dos sensores e status da conexao."""
+    if not oled:
+        return
+    try:
+        oled.fill(0)
+        oled.text("=== MedSolo ===", 0, 0)
+        oled.text(f"Temp: {temp}C", 0, 16)
+        oled.text(f"Solo: {solo_pct}%", 0, 32)
+        if wifi_ok and server_ok:
+            status = "Online"
+        elif wifi_ok:
+            status = "WiFi OK"
         else:
-            temperature = temp_sensor.get_last_reading()
-            humidity = hum_sensor.get_last_reading()
-            if temperature is not None and humidity is not None:
-                print(f"Usando última leitura válida: Temp={temperature}°C | Hum={humidity}%")
-            else:
-                print("Erro na leitura dos sensores.")
-                time.sleep(5)
-                continue
+            status = "Offline"
+        oled.text(f"Status: {status}", 0, 48)
+        oled.text(f"Ciclo: {ciclo}", 0, 56)
+        oled.show()
+    except Exception as e:
+        print(f"L Erro display: {e}")
 
-        # Enviar dados a cada intervalo
-        current_time = time.time()
-        if current_time - last_sent > UPDATE_INTERVAL:
-            if send_to_backend(temperature, humidity):
-                print("Dados enviados com sucesso.")
-                last_sent = current_time
+# --- Funcao Principal ---
+def main():
+    print("= Iniciando monitoramento...")
+    wifi_conectado = conectar_wifi()
+    if not wifi_conectado:
+        print("L WiFi falhou - Verifique as credenciais e o roteador.")
+    ciclo = 0
+    print("\n= Pressione Ctrl+C para parar\n")
+    try:
+        while True:
+            ciclo += 1
+            print(f"--- Ciclo {ciclo} ---")
+            
+            solo_raw, solo_pct, solo_ok = ler_sensor_solo()
+            temp, temp_ok = ler_temperatura_interna()
+            
+            if solo_ok and temp_ok:
+                server_ok = False
+                if wifi_conectado:
+                    server_ok = enviar_dados(temp, solo_pct)
+                
+                atualizar_display(temp, solo_pct, wifi_conectado, server_ok, ciclo)
+                print(f"= Temp: {temp}C | Solo: {solo_pct}% | Servidor: {'OK' if server_ok else 'L'}")
             else:
-                print("Erro no envio dos dados.")
-
-        time.sleep(1)
+                print("L Falha na leitura dos sensores.")
+                if oled:
+                    oled.fill(0)
+                    oled.text("ERRO SENSOR", 0, 20)
+                    oled.show()
+            
+            print(" Aguardando 10s...\n")
+            time.sleep(10)
+            
+    except KeyboardInterrupt:
+        print("\n= Programa parado")
+        if oled:
+            oled.fill(0)
+            oled.text("PROGRAMA", 0, 20)
+            oled.text("PARADO", 0, 32)
+            oled.show()
 
 if __name__ == "__main__":
     try:
-        main()
-    except Exception as e:
-        print("Erro fatal:", e)
-        time.sleep(10)
-        machine.reset()
+        resposta = input("Iniciar monitoramento? (S/N): ").lower().strip()
+        if resposta in ['s', 'sim', 'y', 'yes']:
+            main()
+        else:
+            print("=K Programa encerrado")
+    except:
+        print("=K Programa encerrado")
